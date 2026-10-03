@@ -60,10 +60,13 @@ CHANNEL_2_URL = os.getenv(
 # STORAGE
 # ============================================================
 
+# /var/data permission সমস্যা এড়ানোর জন্য /tmp ব্যবহার করা হচ্ছে.
+# Render restart/redeploy হলে /tmp-এর media মুছে যেতে পারে.
+
 STORAGE_DIR = Path(
     os.getenv(
         "STORAGE_DIR",
-        "/var/data/media"
+        "/tmp/media"
     )
 )
 
@@ -76,7 +79,7 @@ STORAGE_DIR.mkdir(
 DATABASE_PATH = Path(
     os.getenv(
         "DATABASE_PATH",
-        "/var/data/media.db"
+        "/tmp/media.db"
     )
 )
 
@@ -106,7 +109,8 @@ def init_database():
 
     con = get_db()
 
-    con.execute("""
+    con.execute(
+        """
         CREATE TABLE IF NOT EXISTS media (
 
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,7 +136,8 @@ def init_database():
             created_at TEXT NOT NULL
 
         )
-    """)
+        """
+    )
 
     con.commit()
 
@@ -196,7 +201,7 @@ def telegram_api(method):
 
 
 # ============================================================
-# DOWNLOAD FILE FROM TELEGRAM
+# DOWNLOAD FROM TELEGRAM
 # ============================================================
 
 def download_from_telegram(
@@ -210,18 +215,16 @@ def download_from_telegram(
             "BOT_TOKEN is not configured."
         )
 
+    # --------------------------------------------------------
     # Get Telegram file path
+    # --------------------------------------------------------
 
     response = requests.get(
-
         telegram_api("getFile"),
-
         params={
             "file_id": file_id
         },
-
         timeout=30
-
     )
 
     response.raise_for_status()
@@ -244,50 +247,40 @@ def download_from_telegram(
             "Telegram did not return file_path."
         )
 
-
-    # Telegram download URL
+    # --------------------------------------------------------
+    # Download URL
+    # --------------------------------------------------------
 
     download_url = (
-
         "https://api.telegram.org/"
         f"file/bot{BOT_TOKEN}/"
         f"{file_path}"
-
     )
 
-
+    # --------------------------------------------------------
     # Download file
+    # --------------------------------------------------------
 
     with requests.get(
-
         download_url,
-
         stream=True,
-
         timeout=120
-
     ) as response:
 
         response.raise_for_status()
 
         with open(
-
             destination,
-
             "wb"
-
         ) as output:
 
             for chunk in response.iter_content(
-
                 chunk_size=1024 * 1024
-
             ):
 
                 if chunk:
 
                     output.write(chunk)
-
 
     return destination
 
@@ -339,7 +332,9 @@ def health():
 )
 def create_media():
 
+    # --------------------------------------------------------
     # API authentication
+    # --------------------------------------------------------
 
     if not api_authorized():
 
@@ -353,7 +348,9 @@ def create_media():
         }), 401
 
 
-    # JSON body
+    # --------------------------------------------------------
+    # Read JSON
+    # --------------------------------------------------------
 
     data = request.get_json(
         silent=True
@@ -371,7 +368,9 @@ def create_media():
         }), 400
 
 
+    # --------------------------------------------------------
     # Telegram file ID
+    # --------------------------------------------------------
 
     file_id = str(
 
@@ -395,7 +394,9 @@ def create_media():
         }), 400
 
 
+    # --------------------------------------------------------
     # Media type
+    # --------------------------------------------------------
 
     media_type = str(
 
@@ -422,7 +423,9 @@ def create_media():
         }), 400
 
 
-    # Original filename
+    # --------------------------------------------------------
+    # Filename
+    # --------------------------------------------------------
 
     filename = str(
 
@@ -434,7 +437,9 @@ def create_media():
     ).strip()
 
 
+    # --------------------------------------------------------
     # MIME type
+    # --------------------------------------------------------
 
     mime_type = str(
 
@@ -446,7 +451,9 @@ def create_media():
     ).strip()
 
 
-    # Generate unique token
+    # --------------------------------------------------------
+    # Generate private token
+    # --------------------------------------------------------
 
     token = make_token()
 
@@ -463,7 +470,9 @@ def create_media():
         original_name = "media"
 
 
+    # --------------------------------------------------------
     # File extension
+    # --------------------------------------------------------
 
     extension = Path(
         original_name
@@ -481,34 +490,31 @@ def create_media():
             extension = ".jpg"
 
 
+    # --------------------------------------------------------
     # Local filename
+    # --------------------------------------------------------
 
     local_filename = (
-
         token +
         extension
-
     )
 
 
     destination = (
-
         STORAGE_DIR /
         local_filename
-
     )
 
 
+    # --------------------------------------------------------
     # Download from Telegram
+    # --------------------------------------------------------
 
     try:
 
         download_from_telegram(
-
             file_id,
-
             destination
-
         )
 
     except Exception as error:
@@ -537,7 +543,9 @@ def create_media():
         }), 500
 
 
-    # Detect MIME type
+    # --------------------------------------------------------
+    # Detect MIME
+    # --------------------------------------------------------
 
     if not mime_type:
 
@@ -550,32 +558,30 @@ def create_media():
             or
 
             (
-
                 "video/mp4"
-
                 if media_type == "video"
-
                 else "image/jpeg"
-
             )
 
         )
 
 
+    # --------------------------------------------------------
     # File size
+    # --------------------------------------------------------
 
     file_size = destination.stat().st_size
 
 
-    # Save database record
+    # --------------------------------------------------------
+    # Save database
+    # --------------------------------------------------------
 
     con = get_db()
 
     con.execute(
-
         """
         INSERT INTO media
-
         (
             token,
             telegram_file_id,
@@ -588,31 +594,19 @@ def create_media():
         )
 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-
         """,
-
         (
-
             token,
-
             file_id,
-
             original_name,
-
             mime_type,
-
             media_type,
-
             str(destination),
-
             file_size,
-
             datetime.now(
                 timezone.utc
             ).isoformat()
-
         )
-
     )
 
     con.commit()
@@ -620,7 +614,9 @@ def create_media():
     con.close()
 
 
-    # Create public/private viewer URL
+    # --------------------------------------------------------
+    # Create viewer URL
+    # --------------------------------------------------------
 
     base_url = request.host_url.rstrip("/")
 
@@ -628,17 +624,13 @@ def create_media():
     if media_type == "video":
 
         private_url = (
-
             f"{base_url}/v/{token}"
-
         )
 
     else:
 
         private_url = (
-
             f"{base_url}/i/{token}"
-
         )
 
 
@@ -745,8 +737,6 @@ body{
     display:flex;
 
     align-items:center;
-
-    gap:12px;
 
     padding:
         12px
@@ -887,13 +877,6 @@ video{
 }
 
 
-.channel:active{
-
-    transform:scale(.98);
-
-}
-
-
 .rules{
 
     color:#c6cada;
@@ -1009,7 +992,7 @@ video{
 </div>
 
 
-<!-- CHANNELS -->
+<!-- CHANNEL BUTTONS -->
 
 <div class="card">
 
@@ -1068,34 +1051,21 @@ video{
 
 <ul>
 
-
 <li>
-
 ভিডিও/ছবি download করে পুনরায় upload করা নিষিদ্ধ।
-
 </li>
 
-
 <li>
-
 Private link অনুমতি ছাড়া share করা নিষিদ্ধ।
-
 </li>
 
-
 <li>
-
 Content শুধুমাত্র online viewing-এর জন্য।
-
 </li>
-
 
 <li>
-
 Unauthorized distribution নিষিদ্ধ।
-
 </li>
-
 
 </ul>
 
@@ -1115,28 +1085,22 @@ Unauthorized distribution নিষিদ্ধ।
 
 <script>
 
-
 /* Disable right click */
 
 document.addEventListener(
-
     "contextmenu",
-
     function(event){
 
         event.preventDefault();
 
     }
-
 );
 
 
-/* Disable common save/view-source shortcuts */
+/* Disable common keyboard shortcuts */
 
 document.addEventListener(
-
     "keydown",
-
     function(event){
 
         if(
@@ -1146,7 +1110,6 @@ document.addEventListener(
             &&
 
             (
-
                 event.key.toLowerCase()
                 === "s"
 
@@ -1154,7 +1117,6 @@ document.addEventListener(
 
                 event.key.toLowerCase()
                 === "u"
-
             )
 
         ){
@@ -1171,9 +1133,7 @@ document.addEventListener(
         }
 
     }
-
 );
-
 
 </script>
 
@@ -1201,15 +1161,36 @@ def video_viewer(token):
 
             """
 
-            <h2 style="
-            text-align:center;
-            margin-top:80px;
+            <html>
+
+            <head>
+
+            <meta name="viewport"
+            content="width=device-width,initial-scale=1">
+
+            <title>Not Found</title>
+
+            </head>
+
+            <body style="
+            background:#080912;
+            color:white;
             font-family:Arial;
+            text-align:center;
+            padding-top:80px;
             ">
 
+            <h2>
             🔒 Private Video Not Found
-
             </h2>
+
+            <p>
+            This media link is invalid or expired.
+            </p>
+
+            </body>
+
+            </html>
 
             """
 
@@ -1288,15 +1269,36 @@ def image_viewer(token):
 
             """
 
-            <h2 style="
-            text-align:center;
-            margin-top:80px;
+            <html>
+
+            <head>
+
+            <meta name="viewport"
+            content="width=device-width,initial-scale=1">
+
+            <title>Not Found</title>
+
+            </head>
+
+            <body style="
+            background:#080912;
+            color:white;
             font-family:Arial;
+            text-align:center;
+            padding-top:80px;
             ">
 
+            <h2>
             🔒 Private Image Not Found
-
             </h2>
+
+            <p>
+            This media link is invalid or expired.
+            </p>
+
+            </body>
+
+            </html>
 
             """
 
@@ -1360,7 +1362,7 @@ def image_viewer(token):
 
 
 # ============================================================
-# STREAM PRIVATE MEDIA
+# STREAM MEDIA
 # ============================================================
 
 @app.route("/stream/<token>")
@@ -1523,13 +1525,9 @@ def stats():
 # ============================================================
 
 @app.route(
-
     "/api/delete/<token>",
-
     methods=["POST"]
-
 )
-
 def delete_media(token):
 
     if not api_authorized():
@@ -1600,6 +1598,8 @@ def delete_media(token):
     con.close()
 
 
+    # Delete physical file
+
     try:
 
         Path(
@@ -1624,7 +1624,7 @@ def delete_media(token):
 
 
 # ============================================================
-# START SERVER
+# RUN
 # ============================================================
 
 if __name__ == "__main__":
