@@ -1,27 +1,80 @@
 import os
-import secrets
 import sqlite3
+import secrets
 from datetime import datetime, timezone
-
 from flask import Flask, request, jsonify
+
+
+# ============================================================
+# APP
+# ============================================================
 
 app = Flask(__name__)
 
 PORT = int(os.getenv("PORT", "10000"))
 
-BOT_USERNAME = os.getenv(
-    "BOT_USERNAME",
-    "Private_Media_Uploader_Bot"
-).strip().lstrip("@")
+
+# ============================================================
+# ENVIRONMENT VARIABLES
+# ============================================================
+
+BOT_TOKEN = os.getenv(
+    "BOT_TOKEN",
+    ""
+).strip()
+
 
 UPLOAD_API_KEY = os.getenv(
     "UPLOAD_API_KEY",
     ""
 ).strip()
 
-DATABASE_PATH = os.getenv(
-    "DATABASE_PATH",
-    "/tmp/media.db"
+
+ADMIN_ID = os.getenv(
+    "ADMIN_ID",
+    ""
+).strip()
+
+
+BOT_USERNAME = os.getenv(
+    "BOT_USERNAME",
+    "Private_Media_Uploader_Bot"
+).strip()
+
+
+SITE_NAME = os.getenv(
+    "SITE_NAME",
+    "PRIVATE MEDIA"
+).strip()
+
+
+CHANNEL_1_NAME = os.getenv(
+    "CHANNEL_1_NAME",
+    "📢 Channel 1"
+).strip()
+
+
+CHANNEL_1_URL = os.getenv(
+    "CHANNEL_1_URL",
+    "https://t.me/"
+).strip()
+
+
+CHANNEL_2_NAME = os.getenv(
+    "CHANNEL_2_NAME",
+    "📢 Channel 2"
+).strip()
+
+
+CHANNEL_2_URL = os.getenv(
+    "CHANNEL_2_URL",
+    "https://t.me/"
+).strip()
+
+
+ADMIN_USERNAME = os.getenv(
+    "ADMIN_USERNAME",
+    ""
 ).strip()
 
 
@@ -29,37 +82,154 @@ DATABASE_PATH = os.getenv(
 # DATABASE
 # ============================================================
 
+DATABASE_PATH = os.getenv(
+    "DATABASE_PATH",
+    "/tmp/media.db"
+)
+
+
 def get_db():
-    con = sqlite3.connect(
+
+    db = sqlite3.connect(
         DATABASE_PATH,
         timeout=30
     )
 
-    con.row_factory = sqlite3.Row
+    db.row_factory = sqlite3.Row
 
-    return con
+    return db
 
+
+# ============================================================
+# DATABASE INIT
+# ============================================================
 
 def init_database():
 
-    con = get_db()
+    db = get_db()
 
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS media (
+    # --------------------------------------------------------
+    # USERS
+    # --------------------------------------------------------
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            token TEXT UNIQUE NOT NULL,
-            telegram_file_id TEXT NOT NULL,
-            filename TEXT DEFAULT 'media',
-            mime_type TEXT DEFAULT '',
-            media_type TEXT NOT NULL,
-            views INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'active',
-            created_at TEXT NOT NULL
-        )
-    """)
 
-    con.commit()
-    con.close()
+            telegram_id TEXT UNIQUE NOT NULL,
+
+            username TEXT DEFAULT '',
+
+            first_name TEXT DEFAULT '',
+
+            last_name TEXT DEFAULT '',
+
+            created_at TEXT NOT NULL,
+
+            last_seen TEXT NOT NULL
+
+        )
+        """
+    )
+
+
+    # --------------------------------------------------------
+    # MEDIA
+    # --------------------------------------------------------
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS media (
+
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            token TEXT UNIQUE NOT NULL,
+
+            telegram_file_id TEXT NOT NULL,
+
+            user_id TEXT NOT NULL,
+
+            filename TEXT DEFAULT 'media',
+
+            mime_type TEXT DEFAULT '',
+
+            media_type TEXT DEFAULT 'file',
+
+            file_size INTEGER DEFAULT 0,
+
+            views INTEGER DEFAULT 0,
+
+            status TEXT DEFAULT 'active',
+
+            created_at TEXT NOT NULL
+
+        )
+        """
+    )
+
+
+    # --------------------------------------------------------
+    # SETTINGS
+    # --------------------------------------------------------
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+
+            key TEXT PRIMARY KEY,
+
+            value TEXT DEFAULT ''
+
+        )
+        """
+    )
+
+
+    # --------------------------------------------------------
+    # DEFAULT SETTINGS
+    # --------------------------------------------------------
+
+    defaults = {
+
+        "channel_1_name":
+            CHANNEL_1_NAME,
+
+        "channel_1_url":
+            CHANNEL_1_URL,
+
+        "channel_2_name":
+            CHANNEL_2_NAME,
+
+        "channel_2_url":
+            CHANNEL_2_URL,
+
+        "admin_username":
+            ADMIN_USERNAME,
+
+        "site_name":
+            SITE_NAME
+
+    }
+
+
+    for key, value in defaults.items():
+
+        db.execute(
+            """
+            INSERT OR IGNORE INTO settings
+            (key, value)
+
+            VALUES (?, ?)
+            """,
+            (key, value)
+        )
+
+
+    db.commit()
+
+    db.close()
 
 
 init_database()
@@ -69,20 +239,28 @@ init_database()
 # HELPERS
 # ============================================================
 
+def now():
+
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
+
+
 def make_token():
 
-    return secrets.token_urlsafe(16)
+    return secrets.token_urlsafe(18)
 
 
 def authorized():
 
+    if not UPLOAD_API_KEY:
+
+        return False
+
     key = request.headers.get(
         "X-API-KEY",
         ""
-    )
-
-    if not UPLOAD_API_KEY:
-        return False
+    ).strip()
 
     return secrets.compare_digest(
         key,
@@ -90,51 +268,177 @@ def authorized():
     )
 
 
-def get_media(token):
+def is_admin(user_id):
 
-    con = get_db()
+    return (
+        str(user_id) ==
+        str(ADMIN_ID)
+    )
 
-    row = con.execute("""
-        SELECT *
-        FROM media
-        WHERE token = ?
-        AND status = 'active'
-    """, (token,)).fetchone()
 
-    con.close()
+def get_setting(key, fallback=""):
 
-    return row
+    db = get_db()
+
+    row = db.execute(
+        """
+        SELECT value
+
+        FROM settings
+
+        WHERE key = ?
+        """,
+        (key,)
+    ).fetchone()
+
+    db.close()
+
+    if row:
+
+        return row["value"]
+
+    return fallback
+
+
+def set_setting(key, value):
+
+    db = get_db()
+
+    db.execute(
+        """
+        INSERT INTO settings
+        (key, value)
+
+        VALUES (?, ?)
+
+        ON CONFLICT(key)
+
+        DO UPDATE SET
+        value=excluded.value
+        """,
+        (key, value)
+    )
+
+    db.commit()
+
+    db.close()
 
 
 # ============================================================
-# HOME
+# REGISTER / UPDATE USER
 # ============================================================
 
-@app.route("/")
-def home():
+@app.route(
+    "/api/user",
+    methods=["POST"]
+)
+def register_user():
+
+    if not authorized():
+
+        return jsonify({
+            "ok": False,
+            "error": "Unauthorized"
+        }), 401
+
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+
+    telegram_id = str(
+        data.get(
+            "telegram_id",
+            ""
+        )
+    ).strip()
+
+
+    if not telegram_id:
+
+        return jsonify({
+            "ok": False,
+            "error": "telegram_id required"
+        }), 400
+
+
+    username = str(
+        data.get(
+            "username",
+            ""
+        )
+    )
+
+
+    first_name = str(
+        data.get(
+            "first_name",
+            ""
+        )
+    )
+
+
+    last_name = str(
+        data.get(
+            "last_name",
+            ""
+        )
+    )
+
+
+    db = get_db()
+
+
+    db.execute(
+        """
+        INSERT INTO users
+        (
+            telegram_id,
+            username,
+            first_name,
+            last_name,
+            created_at,
+            last_seen
+        )
+
+        VALUES (?, ?, ?, ?, ?, ?)
+
+        ON CONFLICT(telegram_id)
+
+        DO UPDATE SET
+
+            username=excluded.username,
+
+            first_name=excluded.first_name,
+
+            last_name=excluded.last_name,
+
+            last_seen=excluded.last_seen
+        """,
+        (
+            telegram_id,
+            username,
+            first_name,
+            last_name,
+            now(),
+            now()
+        )
+    )
+
+
+    db.commit()
+
+    db.close()
+
 
     return jsonify({
-        "ok": True,
-        "service": "PRIVATE MEDIA UPLOADER",
-        "status": "online"
+        "ok": True
     })
 
 
 # ============================================================
-# HEALTH
-# ============================================================
-
-@app.route("/health")
-def health():
-
-    return jsonify({
-        "ok": True,
-        "status": "online"
-    })
-
-
-# ============================================================
-# CREATE PRIVATE LINK
+# CREATE MEDIA
 # ============================================================
 
 @app.route(
@@ -153,14 +457,7 @@ def create_media():
 
     data = request.get_json(
         silent=True
-    )
-
-    if not data:
-
-        return jsonify({
-            "ok": False,
-            "error": "JSON body required"
-        }), 400
+    ) or {}
 
 
     file_id = str(
@@ -171,31 +468,50 @@ def create_media():
     ).strip()
 
 
+    user_id = str(
+        data.get(
+            "user_id",
+            ""
+        )
+    ).strip()
+
+
     if not file_id:
 
         return jsonify({
             "ok": False,
-            "error": "telegram_file_id is required"
+            "error":
+                "telegram_file_id required"
+        }), 400
+
+
+    if not user_id:
+
+        return jsonify({
+            "ok": False,
+            "error":
+                "user_id required"
         }), 400
 
 
     media_type = str(
         data.get(
             "media_type",
-            ""
+            "file"
         )
     ).lower().strip()
 
 
-    if media_type not in (
+    allowed_types = [
         "video",
-        "image"
-    ):
+        "image",
+        "file"
+    ]
 
-        return jsonify({
-            "ok": False,
-            "error": "media_type must be video or image"
-        }), 400
+
+    if media_type not in allowed_types:
+
+        media_type = "file"
 
 
     filename = str(
@@ -206,6 +522,11 @@ def create_media():
     ).strip()
 
 
+    if not filename:
+
+        filename = "media"
+
+
     mime_type = str(
         data.get(
             "mime_type",
@@ -214,36 +535,93 @@ def create_media():
     ).strip()
 
 
+    file_size = int(
+        data.get(
+            "file_size",
+            0
+        ) or 0
+    )
+
+
+    # --------------------------------------------------------
+    # SAVE USER
+    # --------------------------------------------------------
+
+    db = get_db()
+
+
+    db.execute(
+        """
+        INSERT INTO users
+        (
+            telegram_id,
+            created_at,
+            last_seen
+        )
+
+        VALUES (?, ?, ?)
+
+        ON CONFLICT(telegram_id)
+
+        DO UPDATE SET
+        last_seen=excluded.last_seen
+        """,
+        (
+            user_id,
+            now(),
+            now()
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # CREATE TOKEN
+    # --------------------------------------------------------
+
     token = make_token()
 
 
-    con = get_db()
+    # --------------------------------------------------------
+    # SAVE MEDIA
+    # --------------------------------------------------------
 
-    con.execute("""
+    db.execute(
+        """
         INSERT INTO media
         (
             token,
             telegram_file_id,
+            user_id,
             filename,
             mime_type,
             media_type,
+            file_size,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        token,
-        file_id,
-        filename,
-        mime_type,
-        media_type,
-        datetime.now(
-            timezone.utc
-        ).isoformat()
-    ))
 
-    con.commit()
-    con.close()
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            token,
+            file_id,
+            user_id,
+            filename,
+            mime_type,
+            media_type,
+            file_size,
+            now()
+        )
+    )
 
+
+    db.commit()
+
+    db.close()
+
+
+    # --------------------------------------------------------
+    # TELEGRAM DEEP LINK
+    # --------------------------------------------------------
 
     telegram_url = (
         "https://t.me/"
@@ -259,24 +637,32 @@ def create_media():
 
         "token": token,
 
-        "media_type": media_type,
+        "telegram_file_id":
+            file_id,
 
-        "filename": filename,
+        "media_type":
+            media_type,
 
-        "telegram_url": telegram_url
+        "filename":
+            filename,
+
+        "telegram_url":
+            telegram_url,
+
+        "url":
+            telegram_url
 
     })
 
 
 # ============================================================
-# GET MEDIA INFORMATION
+# GET MEDIA
 # ============================================================
 
 @app.route(
-    "/api/media/<token>",
-    methods=["GET"]
+    "/api/media/<token>"
 )
-def media_info(token):
+def get_media(token):
 
     if not authorized():
 
@@ -286,37 +672,50 @@ def media_info(token):
         }), 401
 
 
-    row = get_media(token)
+    db = get_db()
+
+
+    row = db.execute(
+        """
+        SELECT *
+
+        FROM media
+
+        WHERE token = ?
+
+        AND status = 'active'
+        """,
+        (token,)
+    ).fetchone()
+
+
+    db.close()
 
 
     if not row:
 
         return jsonify({
             "ok": False,
-            "error": "Media not found"
+            "error":
+                "Media not found"
         }), 404
-
-
-    con = get_db()
-
-    con.execute("""
-        UPDATE media
-        SET views = views + 1
-        WHERE token = ?
-    """, (token,))
-
-    con.commit()
-    con.close()
 
 
     return jsonify({
 
         "ok": True,
 
-        "token": row["token"],
+        "id":
+            row["id"],
+
+        "token":
+            row["token"],
 
         "telegram_file_id":
             row["telegram_file_id"],
+
+        "user_id":
+            row["user_id"],
 
         "filename":
             row["filename"],
@@ -328,20 +727,20 @@ def media_info(token):
             row["media_type"],
 
         "views":
-            row["views"] + 1
+            row["views"]
 
     })
 
 
 # ============================================================
-# STATISTICS
+# INCREASE VIEW
 # ============================================================
 
 @app.route(
-    "/api/stats",
-    methods=["GET"]
+    "/api/view/<token>",
+    methods=["POST"]
 )
-def stats():
+def increase_view(token):
 
     if not authorized():
 
@@ -351,56 +750,438 @@ def stats():
         }), 401
 
 
-    con = get_db()
+    db = get_db()
 
 
-    total = con.execute(
-        "SELECT COUNT(*) FROM media "
-        "WHERE status='active'"
-    ).fetchone()[0]
+    result = db.execute(
+        """
+        UPDATE media
+
+        SET views = views + 1
+
+        WHERE token = ?
+
+        AND status = 'active'
+        """,
+        (token,)
+    )
 
 
-    videos = con.execute(
-        "SELECT COUNT(*) FROM media "
-        "WHERE status='active' "
-        "AND media_type='video'"
-    ).fetchone()[0]
+    db.commit()
+
+    db.close()
 
 
-    images = con.execute(
-        "SELECT COUNT(*) FROM media "
-        "WHERE status='active' "
-        "AND media_type='image'"
-    ).fetchone()[0]
+    if result.rowcount == 0:
+
+        return jsonify({
+            "ok": False,
+            "error":
+                "Media not found"
+        }), 404
 
 
-    views = con.execute(
-        "SELECT COALESCE(SUM(views),0) "
-        "FROM media "
-        "WHERE status='active'"
-    ).fetchone()[0]
+    return jsonify({
+        "ok": True
+    })
 
 
-    con.close()
+# ============================================================
+# MY MEDIA
+# ============================================================
+
+@app.route(
+    "/api/my-media/<user_id>"
+)
+def my_media(user_id):
+
+    if not authorized():
+
+        return jsonify({
+            "ok": False,
+            "error": "Unauthorized"
+        }), 401
+
+
+    db = get_db()
+
+
+    rows = db.execute(
+        """
+        SELECT *
+
+        FROM media
+
+        WHERE user_id = ?
+
+        AND status = 'active'
+
+        ORDER BY id DESC
+        """,
+        (str(user_id),)
+    ).fetchall()
+
+
+    db.close()
+
+
+    items = []
+
+
+    for row in rows:
+
+        telegram_url = (
+            "https://t.me/"
+            + BOT_USERNAME
+            + "?start="
+            + row["token"]
+        )
+
+
+        items.append({
+
+            "id":
+                row["id"],
+
+            "token":
+                row["token"],
+
+            "filename":
+                row["filename"],
+
+            "media_type":
+                row["media_type"],
+
+            "views":
+                row["views"],
+
+            "created_at":
+                row["created_at"],
+
+            "telegram_url":
+                telegram_url
+
+        })
 
 
     return jsonify({
 
         "ok": True,
 
-        "total": total,
+        "count":
+            len(items),
 
-        "videos": videos,
-
-        "images": images,
-
-        "views": views
+        "media":
+            items
 
     })
 
 
 # ============================================================
-# DELETE
+# ADMIN STATISTICS
+# ============================================================
+
+@app.route(
+    "/api/admin/stats"
+)
+def admin_stats():
+
+    if not authorized():
+
+        return jsonify({
+            "ok": False,
+            "error": "Unauthorized"
+        }), 401
+
+
+    db = get_db()
+
+
+    users = db.execute(
+        """
+        SELECT COUNT(*)
+        FROM users
+        """
+    ).fetchone()[0]
+
+
+    videos = db.execute(
+        """
+        SELECT COUNT(*)
+        FROM media
+
+        WHERE media_type='video'
+
+        AND status='active'
+        """
+    ).fetchone()[0]
+
+
+    images = db.execute(
+        """
+        SELECT COUNT(*)
+        FROM media
+
+        WHERE media_type='image'
+
+        AND status='active'
+        """
+    ).fetchone()[0]
+
+
+    files = db.execute(
+        """
+        SELECT COUNT(*)
+        FROM media
+
+        WHERE media_type='file'
+
+        AND status='active'
+        """
+    ).fetchone()[0]
+
+
+    links = db.execute(
+        """
+        SELECT COUNT(*)
+        FROM media
+
+        WHERE status='active'
+        """
+    ).fetchone()[0]
+
+
+    views = db.execute(
+        """
+        SELECT COALESCE(
+            SUM(views),
+            0
+        )
+
+        FROM media
+
+        WHERE status='active'
+        """
+    ).fetchone()[0]
+
+
+    db.close()
+
+
+    return jsonify({
+
+        "ok": True,
+
+        "users":
+            users,
+
+        "videos":
+            videos,
+
+        "images":
+            images,
+
+        "files":
+            files,
+
+        "links":
+            links,
+
+        "views":
+            views
+
+    })
+
+
+# ============================================================
+# ADMIN USERS
+# ============================================================
+
+@app.route(
+    "/api/admin/users"
+)
+def admin_users():
+
+    if not authorized():
+
+        return jsonify({
+            "ok": False,
+            "error": "Unauthorized"
+        }), 401
+
+
+    db = get_db()
+
+
+    rows = db.execute(
+        """
+        SELECT
+
+            u.*,
+
+            (
+                SELECT COUNT(*)
+
+                FROM media m
+
+                WHERE m.user_id =
+                u.telegram_id
+
+                AND m.status='active'
+
+            ) AS media_count
+
+        FROM users u
+
+        ORDER BY u.id DESC
+        """
+    ).fetchall()
+
+
+    db.close()
+
+
+    users = []
+
+
+    for row in rows:
+
+        users.append({
+
+            "id":
+                row["id"],
+
+            "telegram_id":
+                row["telegram_id"],
+
+            "username":
+                row["username"],
+
+            "first_name":
+                row["first_name"],
+
+            "last_name":
+                row["last_name"],
+
+            "media_count":
+                row["media_count"],
+
+            "created_at":
+                row["created_at"],
+
+            "last_seen":
+                row["last_seen"]
+
+        })
+
+
+    return jsonify({
+
+        "ok": True,
+
+        "count":
+            len(users),
+
+        "users":
+            users
+
+    })
+
+
+# ============================================================
+# ADMIN ALL MEDIA
+# ============================================================
+
+@app.route(
+    "/api/admin/media"
+)
+def admin_media():
+
+    if not authorized():
+
+        return jsonify({
+            "ok": False,
+            "error": "Unauthorized"
+        }), 401
+
+
+    db = get_db()
+
+
+    rows = db.execute(
+        """
+        SELECT *
+
+        FROM media
+
+        ORDER BY id DESC
+        """
+    ).fetchall()
+
+
+    db.close()
+
+
+    items = []
+
+
+    for row in rows:
+
+        telegram_url = (
+            "https://t.me/"
+            + BOT_USERNAME
+            + "?start="
+            + row["token"]
+        )
+
+
+        items.append({
+
+            "id":
+                row["id"],
+
+            "token":
+                row["token"],
+
+            "user_id":
+                row["user_id"],
+
+            "filename":
+                row["filename"],
+
+            "media_type":
+                row["media_type"],
+
+            "views":
+                row["views"],
+
+            "status":
+                row["status"],
+
+            "created_at":
+                row["created_at"],
+
+            "telegram_url":
+                telegram_url
+
+        })
+
+
+    return jsonify({
+
+        "ok": True,
+
+        "count":
+            len(items),
+
+        "media":
+            items
+
+    })
+
+
+# ============================================================
+# DELETE MEDIA
 # ============================================================
 
 @app.route(
@@ -417,35 +1198,47 @@ def delete_media(token):
         }), 401
 
 
-    con = get_db()
+    db = get_db()
 
 
-    row = con.execute("""
+    row = db.execute(
+        """
         SELECT *
+
         FROM media
+
         WHERE token = ?
-    """, (token,)).fetchone()
+        """,
+        (token,)
+    ).fetchone()
 
 
     if not row:
 
-        con.close()
+        db.close()
 
         return jsonify({
             "ok": False,
-            "error": "Media not found"
+            "error":
+                "Media not found"
         }), 404
 
 
-    con.execute("""
+    db.execute(
+        """
         UPDATE media
+
         SET status='deleted'
+
         WHERE token=?
-    """, (token,))
+        """,
+        (token,)
+    )
 
 
-    con.commit()
-    con.close()
+    db.commit()
+
+    db.close()
 
 
     return jsonify({
@@ -453,7 +1246,156 @@ def delete_media(token):
         "ok": True,
 
         "message":
-            "Private link disabled."
+            "Media link disabled."
+
+    })
+
+
+# ============================================================
+# CHANNEL SETTINGS
+# ============================================================
+
+@app.route(
+    "/api/settings"
+)
+def settings():
+
+    if not authorized():
+
+        return jsonify({
+            "ok": False,
+            "error": "Unauthorized"
+        }), 401
+
+
+    return jsonify({
+
+        "ok": True,
+
+        "channel_1_name":
+            get_setting(
+                "channel_1_name"
+            ),
+
+        "channel_1_url":
+            get_setting(
+                "channel_1_url"
+            ),
+
+        "channel_2_name":
+            get_setting(
+                "channel_2_name"
+            ),
+
+        "channel_2_url":
+            get_setting(
+                "channel_2_url"
+            ),
+
+        "admin_username":
+            get_setting(
+                "admin_username"
+            ),
+
+        "site_name":
+            get_setting(
+                "site_name"
+            )
+
+    })
+
+
+# ============================================================
+# UPDATE SETTINGS
+# ============================================================
+
+@app.route(
+    "/api/settings",
+    methods=["POST"]
+)
+def update_settings():
+
+    if not authorized():
+
+        return jsonify({
+            "ok": False,
+            "error": "Unauthorized"
+        }), 401
+
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+
+    allowed = [
+
+        "channel_1_name",
+
+        "channel_1_url",
+
+        "channel_2_name",
+
+        "channel_2_url",
+
+        "admin_username",
+
+        "site_name"
+
+    ]
+
+
+    for key in allowed:
+
+        if key in data:
+
+            set_setting(
+                key,
+                str(data[key])
+            )
+
+
+    return jsonify({
+        "ok": True
+    })
+
+
+# ============================================================
+# HOME
+# ============================================================
+
+@app.route("/")
+def home():
+
+    return jsonify({
+
+        "ok": True,
+
+        "service":
+            SITE_NAME,
+
+        "status":
+            "online",
+
+        "bot":
+            BOT_USERNAME
+
+    })
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.route("/health")
+def health():
+
+    return jsonify({
+
+        "ok": True,
+
+        "status":
+            "online"
 
     })
 
@@ -465,6 +1407,9 @@ def delete_media(token):
 if __name__ == "__main__":
 
     app.run(
+
         host="0.0.0.0",
+
         port=PORT
+
     )
