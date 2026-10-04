@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import secrets
+import json          # <-- এই লাইনটি নতুন যোগ করা হয়েছে
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
