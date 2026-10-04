@@ -1,146 +1,115 @@
 import os
-import sqlite3
 import secrets
-import json          # <-- এই লাইনটি নতুন যোগ করা হয়েছে
+import sqlite3
+import mimetypes
+from pathlib import Path
 from datetime import datetime, timezone
-from flask import Flask, request, jsonify
 
+import requests
+from flask import (
+    Flask,
+    request,
+    jsonify,
+    render_template_string,
+    send_file,
+    abort
+)
 
 # ============================================================
-# APP
+# APP CONFIG
 # ============================================================
 
 app = Flask(__name__)
 
 PORT = int(os.getenv("PORT", "10000"))
 
-
-# ============================================================
-# ENVIRONMENT VARIABLES
-# ============================================================
-
-BOT_TOKEN = os.getenv(
-    "BOT_TOKEN",
-    ""
-).strip()
-
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 UPLOAD_API_KEY = os.getenv(
     "UPLOAD_API_KEY",
     ""
 ).strip()
 
-
-ADMIN_ID = os.getenv(
-    "ADMIN_ID",
-    ""
-).strip()
-
-
-BOT_USERNAME = os.getenv(
-    "BOT_USERNAME",
-    "Private_Media_Uploader_Bot"
-).strip()
-
-
 SITE_NAME = os.getenv(
     "SITE_NAME",
     "PRIVATE MEDIA"
-).strip()
-
+)
 
 CHANNEL_1_NAME = os.getenv(
     "CHANNEL_1_NAME",
-    "📢 Channel 1"
-).strip()
-
+    "📢 Join Channel 1"
+)
 
 CHANNEL_1_URL = os.getenv(
     "CHANNEL_1_URL",
     "https://t.me/"
-).strip()
-
+)
 
 CHANNEL_2_NAME = os.getenv(
     "CHANNEL_2_NAME",
-    "📢 Channel 2"
-).strip()
-
+    "📢 Join Channel 2"
+)
 
 CHANNEL_2_URL = os.getenv(
     "CHANNEL_2_URL",
     "https://t.me/"
-).strip()
+)
 
 
-ADMIN_USERNAME = os.getenv(
-    "ADMIN_USERNAME",
-    ""
-).strip()
+# ============================================================
+# STORAGE
+# ============================================================
+
+# /var/data permission সমস্যা এড়ানোর জন্য /tmp ব্যবহার করা হচ্ছে.
+# Render restart/redeploy হলে /tmp-এর media মুছে যেতে পারে.
+
+STORAGE_DIR = Path(
+    os.getenv(
+        "STORAGE_DIR",
+        "/tmp/media"
+    )
+)
+
+STORAGE_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+
+DATABASE_PATH = Path(
+    os.getenv(
+        "DATABASE_PATH",
+        "/tmp/media.db"
+    )
+)
+
+DATABASE_PATH.parent.mkdir(
+    parents=True,
+    exist_ok=True
+)
 
 
 # ============================================================
 # DATABASE
 # ============================================================
 
-DATABASE_PATH = os.getenv(
-    "DATABASE_PATH",
-    "/tmp/media.db"
-)
-
-
 def get_db():
 
-    db = sqlite3.connect(
+    con = sqlite3.connect(
         DATABASE_PATH,
         timeout=30
     )
 
-    db.row_factory = sqlite3.Row
+    con.row_factory = sqlite3.Row
 
-    return db
+    return con
 
-
-# ============================================================
-# DATABASE INIT
-# ============================================================
 
 def init_database():
 
-    db = get_db()
+    con = get_db()
 
-    # --------------------------------------------------------
-    # USERS
-    # --------------------------------------------------------
-
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            telegram_id TEXT UNIQUE NOT NULL,
-
-            username TEXT DEFAULT '',
-
-            first_name TEXT DEFAULT '',
-
-            last_name TEXT DEFAULT '',
-
-            created_at TEXT NOT NULL,
-
-            last_seen TEXT NOT NULL
-
-        )
-        """
-    )
-
-
-    # --------------------------------------------------------
-    # MEDIA
-    # --------------------------------------------------------
-
-    db.execute(
+    con.execute(
         """
         CREATE TABLE IF NOT EXISTS media (
 
@@ -148,15 +117,15 @@ def init_database():
 
             token TEXT UNIQUE NOT NULL,
 
-            telegram_file_id TEXT NOT NULL,
+            telegram_file_id TEXT,
 
-            user_id TEXT NOT NULL,
+            filename TEXT,
 
-            filename TEXT DEFAULT 'media',
+            mime_type TEXT,
 
-            mime_type TEXT DEFAULT '',
+            media_type TEXT,
 
-            media_type TEXT DEFAULT 'file',
+            file_path TEXT,
 
             file_size INTEGER DEFAULT 0,
 
@@ -170,67 +139,9 @@ def init_database():
         """
     )
 
+    con.commit()
 
-    # --------------------------------------------------------
-    # SETTINGS
-    # --------------------------------------------------------
-
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS settings (
-
-            key TEXT PRIMARY KEY,
-
-            value TEXT DEFAULT ''
-
-        )
-        """
-    )
-
-
-    # --------------------------------------------------------
-    # DEFAULT SETTINGS
-    # --------------------------------------------------------
-
-    defaults = {
-
-        "channel_1_name":
-            CHANNEL_1_NAME,
-
-        "channel_1_url":
-            CHANNEL_1_URL,
-
-        "channel_2_name":
-            CHANNEL_2_NAME,
-
-        "channel_2_url":
-            CHANNEL_2_URL,
-
-        "admin_username":
-            ADMIN_USERNAME,
-
-        "site_name":
-            SITE_NAME
-
-    }
-
-
-    for key, value in defaults.items():
-
-        db.execute(
-            """
-            INSERT OR IGNORE INTO settings
-            (key, value)
-
-            VALUES (?, ?)
-            """,
-            (key, value)
-        )
-
-
-    db.commit()
-
-    db.close()
+    con.close()
 
 
 init_database()
@@ -240,206 +151,179 @@ init_database()
 # HELPERS
 # ============================================================
 
-def now():
-
-    return datetime.now(
-        timezone.utc
-    ).isoformat()
-
-
 def make_token():
 
-    return secrets.token_urlsafe(18)
+    return secrets.token_urlsafe(24)
 
 
-def authorized():
+def api_authorized():
+
+    supplied_key = request.headers.get(
+        "X-API-KEY",
+        ""
+    )
 
     if not UPLOAD_API_KEY:
 
         return False
 
-    key = request.headers.get(
-        "X-API-KEY",
-        ""
-    ).strip()
-
     return secrets.compare_digest(
-        key,
+        supplied_key,
         UPLOAD_API_KEY
     )
 
 
-def is_admin(user_id):
+def get_media(token):
 
-    return (
-        str(user_id) ==
-        str(ADMIN_ID)
-    )
+    con = get_db()
 
-
-def get_setting(key, fallback=""):
-
-    db = get_db()
-
-    row = db.execute(
+    row = con.execute(
         """
-        SELECT value
-
-        FROM settings
-
-        WHERE key = ?
+        SELECT *
+        FROM media
+        WHERE token = ?
+        AND status = 'active'
         """,
-        (key,)
+        (token,)
     ).fetchone()
 
-    db.close()
+    con.close()
 
-    if row:
-
-        return row["value"]
-
-    return fallback
+    return row
 
 
-def set_setting(key, value):
+def telegram_api(method):
 
-    db = get_db()
-
-    db.execute(
-        """
-        INSERT INTO settings
-        (key, value)
-
-        VALUES (?, ?)
-
-        ON CONFLICT(key)
-
-        DO UPDATE SET
-        value=excluded.value
-        """,
-        (key, value)
+    return (
+        "https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/{method}"
     )
-
-    db.commit()
-
-    db.close()
 
 
 # ============================================================
-# REGISTER / UPDATE USER
+# DOWNLOAD FROM TELEGRAM
 # ============================================================
 
-@app.route(
-    "/api/user",
-    methods=["POST"]
-)
-def register_user():
+def download_from_telegram(
+    file_id,
+    destination
+):
 
-    if not authorized():
+    if not BOT_TOKEN:
 
-        return jsonify({
-            "ok": False,
-            "error": "Unauthorized"
-        }), 401
-
-
-    data = request.get_json(
-        silent=True
-    ) or {}
-
-
-    telegram_id = str(
-        data.get(
-            "telegram_id",
-            ""
+        raise RuntimeError(
+            "BOT_TOKEN is not configured."
         )
-    ).strip()
 
+    # --------------------------------------------------------
+    # Get Telegram file path
+    # --------------------------------------------------------
 
-    if not telegram_id:
-
-        return jsonify({
-            "ok": False,
-            "error": "telegram_id required"
-        }), 400
-
-
-    username = str(
-        data.get(
-            "username",
-            ""
-        )
+    response = requests.get(
+        telegram_api("getFile"),
+        params={
+            "file_id": file_id
+        },
+        timeout=30
     )
 
+    response.raise_for_status()
 
-    first_name = str(
-        data.get(
-            "first_name",
-            ""
+    data = response.json()
+
+    if not data.get("ok"):
+
+        raise RuntimeError(
+            "Telegram getFile failed."
         )
+
+    file_path = data["result"].get(
+        "file_path"
     )
 
+    if not file_path:
 
-    last_name = str(
-        data.get(
-            "last_name",
-            ""
+        raise RuntimeError(
+            "Telegram did not return file_path."
         )
+
+    # --------------------------------------------------------
+    # Download URL
+    # --------------------------------------------------------
+
+    download_url = (
+        "https://api.telegram.org/"
+        f"file/bot{BOT_TOKEN}/"
+        f"{file_path}"
     )
 
+    # --------------------------------------------------------
+    # Download file
+    # --------------------------------------------------------
 
-    db = get_db()
+    with requests.get(
+        download_url,
+        stream=True,
+        timeout=120
+    ) as response:
 
+        response.raise_for_status()
 
-    db.execute(
-        """
-        INSERT INTO users
-        (
-            telegram_id,
-            username,
-            first_name,
-            last_name,
-            created_at,
-            last_seen
-        )
+        with open(
+            destination,
+            "wb"
+        ) as output:
 
-        VALUES (?, ?, ?, ?, ?, ?)
+            for chunk in response.iter_content(
+                chunk_size=1024 * 1024
+            ):
 
-        ON CONFLICT(telegram_id)
+                if chunk:
 
-        DO UPDATE SET
+                    output.write(chunk)
 
-            username=excluded.username,
-
-            first_name=excluded.first_name,
-
-            last_name=excluded.last_name,
-
-            last_seen=excluded.last_seen
-        """,
-        (
-            telegram_id,
-            username,
-            first_name,
-            last_name,
-            now(),
-            now()
-        )
-    )
+    return destination
 
 
-    db.commit()
+# ============================================================
+# HOME
+# ============================================================
 
-    db.close()
-
+@app.route("/")
+def home():
 
     return jsonify({
-        "ok": True
+
+        "ok": True,
+
+        "service": SITE_NAME,
+
+        "status": "online",
+
+        "message":
+            "Private Media Server is running."
+
     })
 
 
 # ============================================================
-# CREATE MEDIA
+# HEALTH CHECK
+# ============================================================
+
+@app.route("/health")
+def health():
+
+    return jsonify({
+
+        "ok": True,
+
+        "status": "online"
+
+    })
+
+
+# ============================================================
+# CREATE PRIVATE MEDIA
 # ============================================================
 
 @app.route(
@@ -448,154 +332,263 @@ def register_user():
 )
 def create_media():
 
-    if not authorized():
+    # --------------------------------------------------------
+    # API authentication
+    # --------------------------------------------------------
+
+    if not api_authorized():
 
         return jsonify({
+
             "ok": False,
-            "error": "Unauthorized"
+
+            "error":
+                "Unauthorized"
+
         }), 401
 
 
+    # --------------------------------------------------------
+    # Read JSON
+    # --------------------------------------------------------
+
     data = request.get_json(
         silent=True
-    ) or {}
+    )
 
+    if not data:
+
+        return jsonify({
+
+            "ok": False,
+
+            "error":
+                "JSON body required"
+
+        }), 400
+
+
+    # --------------------------------------------------------
+    # Telegram file ID
+    # --------------------------------------------------------
 
     file_id = str(
+
         data.get(
             "telegram_file_id",
             ""
         )
-    ).strip()
 
-
-    user_id = str(
-        data.get(
-            "user_id",
-            ""
-        )
     ).strip()
 
 
     if not file_id:
 
         return jsonify({
+
             "ok": False,
+
             "error":
-                "telegram_file_id required"
+                "telegram_file_id is required"
+
         }), 400
 
 
-    if not user_id:
-
-        return jsonify({
-            "ok": False,
-            "error":
-                "user_id required"
-        }), 400
-
+    # --------------------------------------------------------
+    # Media type
+    # --------------------------------------------------------
 
     media_type = str(
+
         data.get(
             "media_type",
-            "file"
+            "video"
         )
+
     ).lower().strip()
 
 
-    allowed_types = [
+    if media_type not in (
         "video",
-        "image",
-        "file"
-    ]
+        "image"
+    ):
+
+        return jsonify({
+
+            "ok": False,
+
+            "error":
+                "media_type must be video or image"
+
+        }), 400
 
 
-    if media_type not in allowed_types:
-
-        media_type = "file"
-
+    # --------------------------------------------------------
+    # Filename
+    # --------------------------------------------------------
 
     filename = str(
+
         data.get(
             "filename",
             "media"
         )
+
     ).strip()
 
 
-    if not filename:
-
-        filename = "media"
-
+    # --------------------------------------------------------
+    # MIME type
+    # --------------------------------------------------------
 
     mime_type = str(
+
         data.get(
             "mime_type",
             ""
         )
+
     ).strip()
 
 
-    file_size = int(
-        data.get(
-            "file_size",
-            0
-        ) or 0
-    )
-
-
     # --------------------------------------------------------
-    # SAVE USER
-    # --------------------------------------------------------
-
-    db = get_db()
-
-
-    db.execute(
-        """
-        INSERT INTO users
-        (
-            telegram_id,
-            created_at,
-            last_seen
-        )
-
-        VALUES (?, ?, ?)
-
-        ON CONFLICT(telegram_id)
-
-        DO UPDATE SET
-        last_seen=excluded.last_seen
-        """,
-        (
-            user_id,
-            now(),
-            now()
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # CREATE TOKEN
+    # Generate private token
     # --------------------------------------------------------
 
     token = make_token()
 
 
+    # Prevent path traversal
+
+    original_name = Path(
+        filename
+    ).name
+
+
+    if not original_name:
+
+        original_name = "media"
+
+
     # --------------------------------------------------------
-    # SAVE MEDIA
+    # File extension
     # --------------------------------------------------------
 
-    db.execute(
+    extension = Path(
+        original_name
+    ).suffix
+
+
+    if not extension:
+
+        if media_type == "video":
+
+            extension = ".mp4"
+
+        else:
+
+            extension = ".jpg"
+
+
+    # --------------------------------------------------------
+    # Local filename
+    # --------------------------------------------------------
+
+    local_filename = (
+        token +
+        extension
+    )
+
+
+    destination = (
+        STORAGE_DIR /
+        local_filename
+    )
+
+
+    # --------------------------------------------------------
+    # Download from Telegram
+    # --------------------------------------------------------
+
+    try:
+
+        download_from_telegram(
+            file_id,
+            destination
+        )
+
+    except Exception as error:
+
+        try:
+
+            destination.unlink(
+                missing_ok=True
+            )
+
+        except Exception:
+
+            pass
+
+
+        return jsonify({
+
+            "ok": False,
+
+            "error":
+                "Could not download file from Telegram.",
+
+            "details":
+                str(error)[:500]
+
+        }), 500
+
+
+    # --------------------------------------------------------
+    # Detect MIME
+    # --------------------------------------------------------
+
+    if not mime_type:
+
+        mime_type = (
+
+            mimetypes.guess_type(
+                original_name
+            )[0]
+
+            or
+
+            (
+                "video/mp4"
+                if media_type == "video"
+                else "image/jpeg"
+            )
+
+        )
+
+
+    # --------------------------------------------------------
+    # File size
+    # --------------------------------------------------------
+
+    file_size = destination.stat().st_size
+
+
+    # --------------------------------------------------------
+    # Save database
+    # --------------------------------------------------------
+
+    con = get_db()
+
+    con.execute(
         """
         INSERT INTO media
         (
             token,
             telegram_file_id,
-            user_id,
             filename,
             mime_type,
             media_type,
+            file_path,
             file_size,
             created_at
         )
@@ -605,31 +598,40 @@ def create_media():
         (
             token,
             file_id,
-            user_id,
-            filename,
+            original_name,
             mime_type,
             media_type,
+            str(destination),
             file_size,
-            now()
+            datetime.now(
+                timezone.utc
+            ).isoformat()
         )
     )
 
+    con.commit()
 
-    db.commit()
-
-    db.close()
+    con.close()
 
 
     # --------------------------------------------------------
-    # TELEGRAM DEEP LINK
+    # Create viewer URL
     # --------------------------------------------------------
 
-    telegram_url = (
-        "https://t.me/"
-        + BOT_USERNAME
-        + "?start="
-        + token
-    )
+    base_url = request.host_url.rstrip("/")
+
+
+    if media_type == "video":
+
+        private_url = (
+            f"{base_url}/v/{token}"
+        )
+
+    else:
+
+        private_url = (
+            f"{base_url}/i/{token}"
+        )
 
 
     return jsonify({
@@ -638,322 +640,856 @@ def create_media():
 
         "token": token,
 
-        "telegram_file_id":
-            file_id,
+        "type": media_type,
 
-        "media_type":
-            media_type,
+        "filename": original_name,
 
-        "filename":
-            filename,
+        "size": file_size,
 
-        "telegram_url":
-            telegram_url,
-
-        "url":
-            telegram_url
+        "url": private_url
 
     })
 
 
 # ============================================================
-# GET MEDIA
+# VIEWER HTML
 # ============================================================
 
-@app.route(
-    "/api/media/<token>"
-)
-def get_media(token):
+VIEWER_HTML = """
 
-    if not authorized():
+<!DOCTYPE html>
 
-        return jsonify({
-            "ok": False,
-            "error": "Unauthorized"
-        }), 401
+<html lang="bn">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+content="width=device-width,
+initial-scale=1,
+maximum-scale=1">
+
+<title>{{ site_name }}</title>
+
+<meta name="robots"
+content="noindex,nofollow,noarchive">
+
+<style>
+
+*{
+
+    box-sizing:border-box;
+
+    -webkit-tap-highlight-color:transparent;
+
+}
 
 
-    db = get_db()
+html,
+body{
+
+    margin:0;
+
+    padding:0;
+
+    min-height:100%;
+
+}
 
 
-    row = db.execute(
-        """
-        SELECT *
+body{
 
-        FROM media
+    background:
 
-        WHERE token = ?
+    radial-gradient(
+        circle at top,
+        #292d6b 0%,
+        #111429 38%,
+        #05060b 100%
+    );
 
-        AND status = 'active'
-        """,
-        (token,)
-    ).fetchone()
+    color:#fff;
+
+    font-family:
+        Arial,
+        "Noto Sans Bengali",
+        sans-serif;
+
+}
 
 
-    db.close()
+.container{
+
+    width:100%;
+
+    max-width:720px;
+
+    margin:auto;
+
+    padding:15px;
+
+}
+
+
+.header{
+
+    display:flex;
+
+    align-items:center;
+
+    padding:
+        12px
+        4px
+        18px;
+
+}
+
+
+.brand{
+
+    font-size:20px;
+
+    font-weight:800;
+
+}
+
+
+.private{
+
+    margin-top:4px;
+
+    font-size:11px;
+
+    color:#9fa6c2;
+
+    letter-spacing:.7px;
+
+}
+
+
+.player-card{
+
+    overflow:hidden;
+
+    border-radius:20px;
+
+    background:#000;
+
+    border:
+        1px solid
+        rgba(255,255,255,.10);
+
+    box-shadow:
+        0 25px 70px
+        rgba(0,0,0,.55);
+
+}
+
+
+video{
+
+    display:block;
+
+    width:100%;
+
+    height:auto;
+
+    max-height:75vh;
+
+    background:#000;
+
+}
+
+
+.image{
+
+    display:block;
+
+    width:100%;
+
+    max-height:80vh;
+
+    object-fit:contain;
+
+    background:#000;
+
+}
+
+
+.card{
+
+    margin-top:16px;
+
+    padding:18px;
+
+    border-radius:19px;
+
+    background:
+        rgba(255,255,255,.065);
+
+    border:
+        1px solid
+        rgba(255,255,255,.10);
+
+    backdrop-filter:blur(15px);
+
+}
+
+
+.card-title{
+
+    font-size:16px;
+
+    font-weight:800;
+
+    margin-bottom:12px;
+
+}
+
+
+.channel{
+
+    display:block;
+
+    text-align:center;
+
+    text-decoration:none;
+
+    color:#fff;
+
+    font-weight:700;
+
+    padding:15px;
+
+    margin-top:10px;
+
+    border-radius:14px;
+
+    background:
+
+        linear-gradient(
+            135deg,
+            #5266ff,
+            #7548ff
+        );
+
+}
+
+
+.rules{
+
+    color:#c6cada;
+
+    line-height:1.6;
+
+}
+
+
+.rules li{
+
+    margin-bottom:8px;
+
+}
+
+
+.footer{
+
+    text-align:center;
+
+    color:#6e748e;
+
+    font-size:12px;
+
+    padding:
+        22px
+        0
+        10px;
+
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+
+<div class="container">
+
+
+<div class="header">
+
+<div>
+
+<div class="brand">
+
+{{ site_name }}
+
+</div>
+
+<div class="private">
+
+🔒 PRIVATE CONTENT
+
+</div>
+
+</div>
+
+</div>
+
+
+<!-- MEDIA -->
+
+<div class="player-card">
+
+
+{% if media_type == "video" %}
+
+<video
+
+    controls
+
+    controlsList="nodownload"
+
+    disablePictureInPicture
+
+    playsinline
+
+    preload="metadata"
+
+    oncontextmenu="return false">
+
+    <source
+
+        src="/stream/{{ token }}"
+
+        type="{{ mime_type }}">
+
+    Your browser does not support video.
+
+</video>
+
+
+{% else %}
+
+
+<img
+
+    class="image"
+
+    src="/stream/{{ token }}"
+
+    alt="Private Image"
+
+    oncontextmenu="return false">
+
+
+{% endif %}
+
+
+</div>
+
+
+<!-- CHANNEL BUTTONS -->
+
+<div class="card">
+
+
+<div class="card-title">
+
+📢 Join Our Channels
+
+</div>
+
+
+<a
+
+    class="channel"
+
+    href="{{ channel1_url }}"
+
+    target="_blank"
+
+    rel="noopener noreferrer">
+
+    {{ channel1_name }}
+
+</a>
+
+
+<a
+
+    class="channel"
+
+    href="{{ channel2_url }}"
+
+    target="_blank"
+
+    rel="noopener noreferrer">
+
+    {{ channel2_name }}
+
+</a>
+
+
+</div>
+
+
+<!-- RULES -->
+
+<div class="card rules">
+
+
+<div class="card-title">
+
+📜 Rules
+
+</div>
+
+
+<ul>
+
+<li>
+ভিডিও/ছবি download করে পুনরায় upload করা নিষিদ্ধ।
+</li>
+
+<li>
+Private link অনুমতি ছাড়া share করা নিষিদ্ধ।
+</li>
+
+<li>
+Content শুধুমাত্র online viewing-এর জন্য।
+</li>
+
+<li>
+Unauthorized distribution নিষিদ্ধ।
+</li>
+
+</ul>
+
+
+</div>
+
+
+<div class="footer">
+
+🔐 Private Media System
+
+</div>
+
+
+</div>
+
+
+<script>
+
+/* Disable right click */
+
+document.addEventListener(
+    "contextmenu",
+    function(event){
+
+        event.preventDefault();
+
+    }
+);
+
+
+/* Disable common keyboard shortcuts */
+
+document.addEventListener(
+    "keydown",
+    function(event){
+
+        if(
+
+            event.ctrlKey
+
+            &&
+
+            (
+                event.key.toLowerCase()
+                === "s"
+
+                ||
+
+                event.key.toLowerCase()
+                === "u"
+            )
+
+        ){
+
+            event.preventDefault();
+
+        }
+
+
+        if(event.key === "F12"){
+
+            event.preventDefault();
+
+        }
+
+    }
+);
+
+</script>
+
+
+</body>
+
+</html>
+
+"""
+
+
+# ============================================================
+# VIDEO VIEWER
+# ============================================================
+
+@app.route("/v/<token>")
+def video_viewer(token):
+
+    row = get_media(token)
 
 
     if not row:
 
-        return jsonify({
-            "ok": False,
-            "error":
-                "Media not found"
-        }), 404
+        return render_template_string(
+
+            """
+
+            <html>
+
+            <head>
+
+            <meta name="viewport"
+            content="width=device-width,initial-scale=1">
+
+            <title>Not Found</title>
+
+            </head>
+
+            <body style="
+            background:#080912;
+            color:white;
+            font-family:Arial;
+            text-align:center;
+            padding-top:80px;
+            ">
+
+            <h2>
+            🔒 Private Video Not Found
+            </h2>
+
+            <p>
+            This media link is invalid or expired.
+            </p>
+
+            </body>
+
+            </html>
+
+            """
+
+        ), 404
 
 
-    return jsonify({
+    if row["media_type"] != "video":
 
-        "ok": True,
-
-        "id":
-            row["id"],
-
-        "token":
-            row["token"],
-
-        "telegram_file_id":
-            row["telegram_file_id"],
-
-        "user_id":
-            row["user_id"],
-
-        "filename":
-            row["filename"],
-
-        "mime_type":
-            row["mime_type"],
-
-        "media_type":
-            row["media_type"],
-
-        "views":
-            row["views"]
-
-    })
+        return (
+            "Invalid media type",
+            400
+        )
 
 
-# ============================================================
-# INCREASE VIEW
-# ============================================================
+    # Increase view count
 
-@app.route(
-    "/api/view/<token>",
-    methods=["POST"]
-)
-def increase_view(token):
+    con = get_db()
 
-    if not authorized():
+    con.execute(
 
-        return jsonify({
-            "ok": False,
-            "error": "Unauthorized"
-        }), 401
-
-
-    db = get_db()
-
-
-    result = db.execute(
         """
+
         UPDATE media
 
         SET views = views + 1
 
         WHERE token = ?
 
-        AND status = 'active'
         """,
+
         (token,)
+
+    )
+
+    con.commit()
+
+    con.close()
+
+
+    return render_template_string(
+
+        VIEWER_HTML,
+
+        site_name=SITE_NAME,
+
+        media_type="video",
+
+        token=token,
+
+        mime_type=row["mime_type"],
+
+        channel1_name=CHANNEL_1_NAME,
+
+        channel1_url=CHANNEL_1_URL,
+
+        channel2_name=CHANNEL_2_NAME,
+
+        channel2_url=CHANNEL_2_URL
+
     )
 
 
-    db.commit()
-
-    db.close()
-
-
-    if result.rowcount == 0:
-
-        return jsonify({
-            "ok": False,
-            "error":
-                "Media not found"
-        }), 404
-
-
-    return jsonify({
-        "ok": True
-    })
-
-
 # ============================================================
-# MY MEDIA
+# IMAGE VIEWER
 # ============================================================
 
-@app.route(
-    "/api/my-media/<user_id>"
-)
-def my_media(user_id):
+@app.route("/i/<token>")
+def image_viewer(token):
 
-    if not authorized():
-
-        return jsonify({
-            "ok": False,
-            "error": "Unauthorized"
-        }), 401
+    row = get_media(token)
 
 
-    db = get_db()
+    if not row:
+
+        return render_template_string(
+
+            """
+
+            <html>
+
+            <head>
+
+            <meta name="viewport"
+            content="width=device-width,initial-scale=1">
+
+            <title>Not Found</title>
+
+            </head>
+
+            <body style="
+            background:#080912;
+            color:white;
+            font-family:Arial;
+            text-align:center;
+            padding-top:80px;
+            ">
+
+            <h2>
+            🔒 Private Image Not Found
+            </h2>
+
+            <p>
+            This media link is invalid or expired.
+            </p>
+
+            </body>
+
+            </html>
+
+            """
+
+        ), 404
 
 
-    rows = db.execute(
-        """
-        SELECT *
+    if row["media_type"] != "image":
 
-        FROM media
-
-        WHERE user_id = ?
-
-        AND status = 'active'
-
-        ORDER BY id DESC
-        """,
-        (str(user_id),)
-    ).fetchall()
-
-
-    db.close()
-
-
-    items = []
-
-
-    for row in rows:
-
-        telegram_url = (
-            "https://t.me/"
-            + BOT_USERNAME
-            + "?start="
-            + row["token"]
+        return (
+            "Invalid media type",
+            400
         )
 
 
-        items.append({
+    # Increase view count
 
-            "id":
-                row["id"],
+    con = get_db()
 
-            "token":
-                row["token"],
+    con.execute(
 
-            "filename":
-                row["filename"],
+        """
 
-            "media_type":
-                row["media_type"],
+        UPDATE media
 
-            "views":
-                row["views"],
+        SET views = views + 1
 
-            "created_at":
-                row["created_at"],
+        WHERE token = ?
 
-            "telegram_url":
-                telegram_url
+        """,
 
-        })
+        (token,)
+
+    )
+
+    con.commit()
+
+    con.close()
 
 
-    return jsonify({
+    return render_template_string(
 
-        "ok": True,
+        VIEWER_HTML,
 
-        "count":
-            len(items),
+        site_name=SITE_NAME,
 
-        "media":
-            items
+        media_type="image",
 
-    })
+        token=token,
+
+        mime_type=row["mime_type"],
+
+        channel1_name=CHANNEL_1_NAME,
+
+        channel1_url=CHANNEL_1_URL,
+
+        channel2_name=CHANNEL_2_NAME,
+
+        channel2_url=CHANNEL_2_URL
+
+    )
 
 
 # ============================================================
-# ADMIN STATISTICS
+# STREAM MEDIA
 # ============================================================
 
-@app.route(
-    "/api/admin/stats"
-)
-def admin_stats():
+@app.route("/stream/<token>")
+def stream_media(token):
 
-    if not authorized():
+    row = get_media(token)
+
+
+    if not row:
+
+        abort(404)
+
+
+    file_path = Path(
+        row["file_path"]
+    )
+
+
+    if not file_path.exists():
+
+        abort(404)
+
+
+    response = send_file(
+
+        file_path,
+
+        mimetype=row["mime_type"],
+
+        as_attachment=False,
+
+        conditional=True
+
+    )
+
+
+    response.headers[
+        "Content-Disposition"
+    ] = "inline"
+
+
+    response.headers[
+        "X-Content-Type-Options"
+    ] = "nosniff"
+
+
+    response.headers[
+        "Cache-Control"
+    ] = "private, no-store"
+
+
+    response.headers[
+        "X-Frame-Options"
+    ] = "SAMEORIGIN"
+
+
+    response.headers[
+        "Referrer-Policy"
+    ] = "no-referrer"
+
+
+    return response
+
+
+# ============================================================
+# ADMIN STATS
+# ============================================================
+
+@app.route("/api/stats")
+def stats():
+
+    if not api_authorized():
 
         return jsonify({
+
             "ok": False,
-            "error": "Unauthorized"
+
+            "error":
+                "Unauthorized"
+
         }), 401
 
 
-    db = get_db()
+    con = get_db()
 
 
-    users = db.execute(
-        """
-        SELECT COUNT(*)
-        FROM users
-        """
+    total = con.execute(
+
+        "SELECT COUNT(*) FROM media"
+
     ).fetchone()[0]
 
 
-    videos = db.execute(
+    videos = con.execute(
+
         """
+
         SELECT COUNT(*)
+
         FROM media
 
         WHERE media_type='video'
 
-        AND status='active'
         """
+
     ).fetchone()[0]
 
 
-    images = db.execute(
+    images = con.execute(
+
         """
+
         SELECT COUNT(*)
+
         FROM media
 
         WHERE media_type='image'
 
-        AND status='active'
         """
+
     ).fetchone()[0]
 
 
-    files = db.execute(
+    views = con.execute(
+
         """
-        SELECT COUNT(*)
-        FROM media
 
-        WHERE media_type='file'
-
-        AND status='active'
-        """
-    ).fetchone()[0]
-
-
-    links = db.execute(
-        """
-        SELECT COUNT(*)
-        FROM media
-
-        WHERE status='active'
-        """
-    ).fetchone()[0]
-
-
-    views = db.execute(
-        """
         SELECT COALESCE(
             SUM(views),
             0
@@ -961,222 +1497,25 @@ def admin_stats():
 
         FROM media
 
-        WHERE status='active'
         """
+
     ).fetchone()[0]
 
 
-    db.close()
+    con.close()
 
 
     return jsonify({
 
         "ok": True,
 
-        "users":
-            users,
+        "total": total,
 
-        "videos":
-            videos,
+        "videos": videos,
 
-        "images":
-            images,
+        "images": images,
 
-        "files":
-            files,
-
-        "links":
-            links,
-
-        "views":
-            views
-
-    })
-
-
-# ============================================================
-# ADMIN USERS
-# ============================================================
-
-@app.route(
-    "/api/admin/users"
-)
-def admin_users():
-
-    if not authorized():
-
-        return jsonify({
-            "ok": False,
-            "error": "Unauthorized"
-        }), 401
-
-
-    db = get_db()
-
-
-    rows = db.execute(
-        """
-        SELECT
-
-            u.*,
-
-            (
-                SELECT COUNT(*)
-
-                FROM media m
-
-                WHERE m.user_id =
-                u.telegram_id
-
-                AND m.status='active'
-
-            ) AS media_count
-
-        FROM users u
-
-        ORDER BY u.id DESC
-        """
-    ).fetchall()
-
-
-    db.close()
-
-
-    users = []
-
-
-    for row in rows:
-
-        users.append({
-
-            "id":
-                row["id"],
-
-            "telegram_id":
-                row["telegram_id"],
-
-            "username":
-                row["username"],
-
-            "first_name":
-                row["first_name"],
-
-            "last_name":
-                row["last_name"],
-
-            "media_count":
-                row["media_count"],
-
-            "created_at":
-                row["created_at"],
-
-            "last_seen":
-                row["last_seen"]
-
-        })
-
-
-    return jsonify({
-
-        "ok": True,
-
-        "count":
-            len(users),
-
-        "users":
-            users
-
-    })
-
-
-# ============================================================
-# ADMIN ALL MEDIA
-# ============================================================
-
-@app.route(
-    "/api/admin/media"
-)
-def admin_media():
-
-    if not authorized():
-
-        return jsonify({
-            "ok": False,
-            "error": "Unauthorized"
-        }), 401
-
-
-    db = get_db()
-
-
-    rows = db.execute(
-        """
-        SELECT *
-
-        FROM media
-
-        ORDER BY id DESC
-        """
-    ).fetchall()
-
-
-    db.close()
-
-
-    items = []
-
-
-    for row in rows:
-
-        telegram_url = (
-            "https://t.me/"
-            + BOT_USERNAME
-            + "?start="
-            + row["token"]
-        )
-
-
-        items.append({
-
-            "id":
-                row["id"],
-
-            "token":
-                row["token"],
-
-            "user_id":
-                row["user_id"],
-
-            "filename":
-                row["filename"],
-
-            "media_type":
-                row["media_type"],
-
-            "views":
-                row["views"],
-
-            "status":
-                row["status"],
-
-            "created_at":
-                row["created_at"],
-
-            "telegram_url":
-                telegram_url
-
-        })
-
-
-    return jsonify({
-
-        "ok": True,
-
-        "count":
-            len(items),
-
-        "media":
-            items
+        "views": views
 
     })
 
@@ -1191,55 +1530,87 @@ def admin_media():
 )
 def delete_media(token):
 
-    if not authorized():
+    if not api_authorized():
 
         return jsonify({
+
             "ok": False,
-            "error": "Unauthorized"
+
+            "error":
+                "Unauthorized"
+
         }), 401
 
 
-    db = get_db()
+    con = get_db()
 
 
-    row = db.execute(
+    row = con.execute(
+
         """
+
         SELECT *
 
         FROM media
 
         WHERE token = ?
+
         """,
+
         (token,)
+
     ).fetchone()
 
 
     if not row:
 
-        db.close()
+        con.close()
 
         return jsonify({
+
             "ok": False,
+
             "error":
-                "Media not found"
+                "Not found"
+
         }), 404
 
 
-    db.execute(
+    con.execute(
+
         """
+
         UPDATE media
 
         SET status='deleted'
 
         WHERE token=?
+
         """,
+
         (token,)
+
     )
 
 
-    db.commit()
+    con.commit()
 
-    db.close()
+    con.close()
+
+
+    # Delete physical file
+
+    try:
+
+        Path(
+            row["file_path"]
+        ).unlink(
+            missing_ok=True
+        )
+
+    except Exception:
+
+        pass
 
 
     return jsonify({
@@ -1247,156 +1618,7 @@ def delete_media(token):
         "ok": True,
 
         "message":
-            "Media link disabled."
-
-    })
-
-
-# ============================================================
-# CHANNEL SETTINGS
-# ============================================================
-
-@app.route(
-    "/api/settings"
-)
-def settings():
-
-    if not authorized():
-
-        return jsonify({
-            "ok": False,
-            "error": "Unauthorized"
-        }), 401
-
-
-    return jsonify({
-
-        "ok": True,
-
-        "channel_1_name":
-            get_setting(
-                "channel_1_name"
-            ),
-
-        "channel_1_url":
-            get_setting(
-                "channel_1_url"
-            ),
-
-        "channel_2_name":
-            get_setting(
-                "channel_2_name"
-            ),
-
-        "channel_2_url":
-            get_setting(
-                "channel_2_url"
-            ),
-
-        "admin_username":
-            get_setting(
-                "admin_username"
-            ),
-
-        "site_name":
-            get_setting(
-                "site_name"
-            )
-
-    })
-
-
-# ============================================================
-# UPDATE SETTINGS
-# ============================================================
-
-@app.route(
-    "/api/settings",
-    methods=["POST"]
-)
-def update_settings():
-
-    if not authorized():
-
-        return jsonify({
-            "ok": False,
-            "error": "Unauthorized"
-        }), 401
-
-
-    data = request.get_json(
-        silent=True
-    ) or {}
-
-
-    allowed = [
-
-        "channel_1_name",
-
-        "channel_1_url",
-
-        "channel_2_name",
-
-        "channel_2_url",
-
-        "admin_username",
-
-        "site_name"
-
-    ]
-
-
-    for key in allowed:
-
-        if key in data:
-
-            set_setting(
-                key,
-                str(data[key])
-            )
-
-
-    return jsonify({
-        "ok": True
-    })
-
-
-# ============================================================
-# HOME
-# ============================================================
-
-@app.route("/")
-def home():
-
-    return jsonify({
-
-        "ok": True,
-
-        "service":
-            SITE_NAME,
-
-        "status":
-            "online",
-
-        "bot":
-            BOT_USERNAME
-
-    })
-
-
-# ============================================================
-# HEALTH
-# ============================================================
-
-@app.route("/health")
-def health():
-
-    return jsonify({
-
-        "ok": True,
-
-        "status":
-            "online"
+            "Media deleted successfully."
 
     })
 
